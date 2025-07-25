@@ -1,19 +1,18 @@
 ### IMPORT ###
+import streamlit as stimport
 import os
+import streamlit as st
 import numpy as np
 from PIL import Image
 import requests
 from io import BytesIO
 import matplotlib.pyplot as plt
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 from torchmetrics.classification import Accuracy
 from pytorch_lightning import LightningModule
-
-# Для более сложных аугментаций рекомендуется использовать библиотеку Albumentations
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
@@ -65,7 +64,6 @@ class UNet(nn.Module):
             x = torch.cat([skip, x], dim=1)
             x = self.ups[idx+1](x)
         return self.final_conv(x)
-
 
 class UNetLitModule(pl.LightningModule):
     def __init__(self, in_channels=3, out_channels=1, lr=1e-3):
@@ -129,8 +127,8 @@ def overlay_prediction_only(img_path: str,
                             transform=None,
                             threshold: float = 0.5,
                             alpha: float = 0.4,
-                            figsize: tuple = (6, 6),
-                            dpi: int = 100):
+                            figsize: tuple = (20, 20),
+                            dpi: int = 150):
     """
     Отображает одно тестовое изображение с наложенной предсказанной моделью маской,
     когда истинная маска отсутствует.
@@ -170,52 +168,88 @@ def overlay_prediction_only(img_path: str,
     overlay[..., 3] = alpha * pred_mask  # альфа-канал
     
     # Визуализация
-    fig, ax = plt.subplots(1, 2, figsize=figsize, dpi=dpi)
+    fig, ax = plt.subplots(2, 1, figsize=figsize, dpi=dpi)
     ax[0].imshow(base_img)
     ax[1].imshow(base_img)
     ax[1].imshow(overlay)
     ax[0].axis("off")
     ax[1].axis("off")
-    ax[0].set_title("Basic image")
-    ax[1].set_title(f"Image with Predicted (avg conf {avg_conf:.1f}%)")
-    plt.show()
+    ax[0].set_title("Исходное изображение")
+    ax[1].set_title(f"Изображение с предсказанием (уверенность модели {avg_conf:.1f}%)")
+    return fig
 
-def visual_predict(path_):
-    # проверка сслыка, файл или диерктория
-    if os.path.isdir(path_):
-        fld_path = os.walk(os.path.expanduser(path_))
-        for folder, subfolders, files in fld_path:
-            for name in files:
-                if name.endswith('.jpg'):
-                    img_path = os.path.join(folder, name)
-                    overlay_prediction_only(img_path=img_path, 
-                                            model=lit_model,
-                                            transform=get_val_transform(),
-                                            threshold=0.4,
-                                            alpha=0.5,
-                                            figsize=(10, 10),
-                                            dpi=150)
-    elif path_.startswith('http://') or path_.startswith('https://'):
-        response = requests.get(path_)
-        img = Image.open(BytesIO(response.content))
-        img.save('tmp.jpg')  # сохраняем во временный файл
-        img_path = 'tmp.jpg'
-        overlay_prediction_only(img_path=img_path, 
-                            model=lit_model,
-                            transform=get_val_transform(),
-                            threshold=0.7,
-                            alpha=0.5,
-                            figsize=(10, 10),
-                            dpi=150)
+### Streamlit-приложение ###
+
+@st.cache_resource
+def load_model(ckpt_path: str):
+    """Кэшируем модель, чтобы не перезагружать."""
+    base = UNet(in_channels=3, out_channels=1)
+    lit  = UNetLitModule.load_from_checkpoint(
+        ckpt_path,
+        in_channels=3, out_channels=1, lr=1e-3
+    )
+    lit.eval()
+    lit.freeze()
+    lit.to(DEVICE)
+
+    return lit
+
+def main():
+    st.title("UNet модель обученная на сегментацию изображений аэрофотоснимков лесов")
+
+    st.sidebar.header("Параметры")
+    ckpt_path = st.sidebar.text_input("Путь к .ckpt", value="../models/unet_9_epoch.ckpt")
+    if st.sidebar.button("Загрузить модель"):
+        if os.path.isfile(ckpt_path):
+            st.session_state.model = load_model(ckpt_path)
+            st.success("Модель загружена")
+        else:
+            st.error("Чекпойнт не найден")
+
+    threshold = st.sidebar.slider("Threshold", 0.0, 1.0, 0.5, 0.01)
+    alpha     = st.sidebar.slider("Прозрачность", 0.0, 1.0, 0.4, 0.05)
+
+    uploaded = st.file_uploader("Загрузите изображение", type=["jpg","png","jpeg"])
+    if uploaded:
+        # Конвертируем загруженный файл в PIL.Image и numpy-массив
+        img_pil = Image.open(uploaded).convert("RGB")
+        tmp_path = "tmp_input.png"
+        img_pil.save(tmp_path)
+        # Теперь можно показать входное изображение
+        # st.image(img_pil, caption="Входное изображение", use_container_width=True)
+
+        if "model" in st.session_state:
+            fig = overlay_prediction_only(
+                img_path=tmp_path,
+                model=st.session_state.model,
+                transform=get_val_transform(),
+                threshold=threshold,
+                alpha=alpha
+            )
+            st.pyplot(fig)
+        else:
+            st.warning("Сначала загрузите модель")
+
+    # Отображение метрик из папки images/unet
+    metrics_dir = "../images/unet"  # путь к вашей папке с картинками
+    if os.path.isdir(metrics_dir):
+        st.header("Метрики обучения")
+        img_files = sorted(
+            f for f in os.listdir(metrics_dir)
+            if f.lower().endswith((".png", ".jpg", ".jpeg", ".gif"))
+        )
+        for img_name in img_files:
+            img_path = os.path.join(metrics_dir, img_name)
+            caption = os.path.splitext(img_name)[0]
+            # выводим каждую картинку отдельно, сверху вниз, с увеличенной шириной
+            st.image(
+                Image.open(img_path),
+                caption=caption,
+                use_container_width=False,
+                width=800  # задаёт ширину в пикселях
+            )
     else:
-        img_path=os.path.expanduser(path_)
-        overlay_prediction_only(img_path=img_path, 
-                                model=lit_model,
-                                transform=get_val_transform(),
-                                threshold=0.7,
-                                alpha=0.5,
-                                figsize=(10, 10),
-                                dpi=150)
+        st.warning(f"Папка с метриками не найдена: {metrics_dir}")
 
-path_ = 'https://images.stockcake.com/public/d/2/0/d20c6b7a-67b8-450d-a133-3041d913036c_large/deforestation-versus-nature-stockcake.jpg'
-visual_predict(path_)
+if __name__ == "__main__":
+    main()
