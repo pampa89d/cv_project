@@ -6,6 +6,8 @@ from PIL import Image, ImageFilter
 import numpy as np
 import os
 import matplotlib.pyplot as plt
+import requests
+from io import BytesIO
 
 # Настройки страницы
 st.set_page_config(
